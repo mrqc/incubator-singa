@@ -440,29 +440,39 @@ void Mult(const SType alpha, const Tensor &A, const Tensor &B, const SType beta,
 // Misc.
 // ****************
 /// Compute the cross entropy loss given the prediction probability 'p' and
-/// the target (ground truth) labels 't'. 'p' and 't' are either 1-d vector
-/// or 2-d matrix. 'loss' is 1-d vector. The loss is computed into p.
+/// the target (ground truth) labels 't'. 'p' could be either a 1-d vector for
+/// a single instance or a 2-d matrix for a batch of instances. t[i]
+/// could be the ground truth label index or a label weighted
+/// array of the i-th instance. For example, if there are 3 candidate labels for
+/// each instance, t[i] could be 2 or [0, 0, 1]. If one instance could have
+/// multiple labels, then t[i] could be [1, 0, 1].
+/// The loss is computed into p.
 void ComputeCrossEntropy(const Tensor &p, const Tensor &t, Tensor *loss);
 /// Compute the dx, given prediction probability 'p' (p=softmax(x)) and
 /// the target (ground truth) labels 't'. 'p' and 't' are either 1-d vector
 /// or 2-d matrix. 'grad' has the same shape as 'p'. dx is computed into p.
 void SoftmaxCrossEntropyBwd(const Tensor &t, Tensor *p);
 
-/// Return a tensor consisting of rows ([start, end)) from 'in'. It shares the
-/// memory with 'in'. 'in' is a 1D or 2D Tensor.
-Tensor SliceRows(const Tensor &in, const size_t start, const size_t end);
 /// Return a tensor consisting of rows ([start, end)) from 'in'. It copies the
 /// values from 'in'. 'in' ia a 2D Tensor.
 Tensor CopyRows(const Tensor &in, const size_t start, const size_t end);
+/// Alias of CopyRows
+Tensor SliceRows(const Tensor &in, const size_t start, const size_t end);
 /// Return a tensor consisting of columns ([start, end)) from 'in'. It copies
 /// the values from 'in'. 'in' is a  2D Tensor.
 Tensor CopyColumns(const Tensor &in, const size_t start, const size_t end);
+/// Alias of CopyColumns
+Tensor SliceColumns(const Tensor &in, const size_t start, const size_t end);
 /// Return a tensor which is vertically stacked from tensors in 'in'. Each
 /// tensor in 'in' is a 2D tensor. Values are copied, no memory sharing.
 Tensor ConcatenateRows(const vector<Tensor> &in);
+/// Alias name for function ConcatenateRows
+Tensor ConcatRows(const vector<Tensor> &in);
 /// Return a tensor which is horizontally stacked from tensors in 'in'. Each
 /// tensor in 'in' is a 2D tensor. Values are copied, no memory sharing.
 Tensor ConcatenateColumns(const vector<Tensor> &in);
+/// Alias name for function ConcatenateColumns
+Tensor ConcatColumns(const vector<Tensor> &in);
 }  // namespace singa
 
 #endif  // SINGA_CORE_TENSOR_H_

@@ -762,7 +762,9 @@ Tensor ConcatenateRows(const vector<Tensor> &in) {
   }
   return out;
 }
-
+Tensor ConcatRows(const vector<Tensor> &in) {
+  return ConcatenateRows(in);
+}
 // TODO(wangwei) add a copypatch function for improve the efficiency on GPU.
 Tensor ConcatenateColumns(const vector<Tensor> &in) {
   size_t nrow = 0, ncol = 0;
@@ -788,16 +790,23 @@ Tensor ConcatenateColumns(const vector<Tensor> &in) {
   }
   return out;
 }
+Tensor ConcatColumns(const vector<Tensor> &in) {
+  return ConcatenateColumns(in);
+}
 
 Tensor CopyRows(const Tensor &in, const size_t start, const size_t end) {
   CHECK_LT(start, end);
-  CHECK_GE(in.shape(0), end);
+  CHECK_GE(in.shape(0), end) << "Tensor size must >= end";
   Shape s = in.shape();
   s[0] = end - start;
   size_t sample_size = in.Size() / in.shape(0);
   Tensor out(s, in.device(), in.data_type());
   CopyDataToFrom(&out, in, out.Size(), 0, start * sample_size);
   return out;
+}
+
+Tensor SliceRows(const Tensor &in, const size_t start, const size_t end) {
+  return CopyRows(in, start, end);
 }
 
 Tensor CopyColumns(const Tensor &in, const size_t start, const size_t end) {
@@ -813,6 +822,11 @@ Tensor CopyColumns(const Tensor &in, const size_t start, const size_t end) {
   }
   return out;
 }
+
+Tensor SliceColumns(const Tensor &in, const size_t start, const size_t end) {
+  return CopyColumns(in, start, end);
+}
+
 
 /// Divide row 'v' by each row of matrix M; write results into 'out'
 void DivRow(const Tensor &v, Tensor *M) {
@@ -849,24 +863,6 @@ void MultRow(const Tensor &v, Tensor *M) {
                         M->block(), ctx);
     }, {M->block(), v.block()}, {M->block()});
   });
-}
-
-Tensor SliceRows(const Tensor &in, const size_t start, const size_t end) {
-  LOG(FATAL) << "Tensor::SliceRows is not implemented";
-  Tensor ret;
-  /*
-  CHECK_LE(in.nDim(), 2);
-  CHECK_LT(start, end);
-  CHECK_LE(in.shape(0), end);
-  Shape s;
-  if (in.nDim() == 2)
-    s = Shape{end - start, in.shape(1)};
-  else
-    s = Shape{end - start};
-  Tensor out(s, in.device(), in.data_type());
-  Block *b = out.block();
-  */
-  return ret;
 }
 
 void SubColumn(const Tensor &v, Tensor *M) { AddColumn(-1, 1, v, M); }
@@ -999,31 +995,33 @@ void Mult(const SType alpha, const Tensor &A, const Tensor &B, const SType beta,
 
 // ************************
 // Misc.
-// ***********************
+// ************************
 void ComputeCrossEntropy(const Tensor &p, const Tensor &t, Tensor *loss) {
   CHECK_LE(p.nDim(), 2u);
-  CHECK_LE(t.nDim(), 2u);  // TODO(wangwei) consider multi-labels.
+  CHECK_LE(t.nDim(), 2u);
   size_t batchsize = 1;
   if (p.nDim() == 2u) batchsize = p.shape(0);
   size_t dim = p.Size() / batchsize;
   TYPE_LANG_SWITCH(p.data_type(), DType, p.device()->lang(), Lang, {
     p.device()->Exec([batchsize, dim, t, p, loss](Context *ctx) {
-      ComputeCrossEntropy<DType, Lang>(batchsize, dim, p.block(), t.block(),
-                                       loss->block(), ctx);
+        bool int_target = t.Size() == batchsize;
+        ComputeCrossEntropy<DType, Lang>(int_target, batchsize, dim, p.block(),
+            t.block(), loss->block(), ctx);
     }, {p.block(), t.block()}, {loss->block()});
   });
 }
 
 void SoftmaxCrossEntropyBwd(const Tensor &t, Tensor *p) {
   CHECK_LE(p->nDim(), 2u);
-  CHECK_LE(t.nDim(), 2u);  // TODO(wangwei) consider multi-labels.
+  CHECK_LE(t.nDim(), 2u);
   size_t batchsize = 1;
   if (p->nDim() == 2u) batchsize = p->shape(0);
   size_t dim = p->Size() / batchsize;
   TYPE_LANG_SWITCH(p->data_type(), DType, p->device()->lang(), Lang, {
     p->device()->Exec([batchsize, dim, t, p](Context *ctx) {
-      SoftmaxCrossEntropyBwd<DType, Lang>(batchsize, dim, p->block(), t.block(),
-                                          p->block(), ctx);
+      bool int_target = t.Size() == batchsize;
+      SoftmaxCrossEntropyBwd<DType, Lang>(int_target, batchsize, dim,
+          p->block(), t.block(), p->block(), ctx);
     }, {p->block(), t.block()}, {p->block()});
   });
 }

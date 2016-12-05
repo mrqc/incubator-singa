@@ -21,7 +21,6 @@ Example usages::
     from singa import layer
     from singa import tensor
     from singa import device
-    from singa.model_pb2 import kTrain
 
     layer.engine = 'cudnn'  # to use cudnn layers
     dev = device.create_cuda_gpu()
@@ -31,7 +30,7 @@ Example usages::
     conv.to_device(dev)  # move the layer data onto a CudaGPU device
     x = tensor.Tensor((3, 32, 32), dev)
     x.uniform(-1, 1)
-    y = conv.foward(kTrain, x)
+    y = conv.foward(True, x)
 
     dy = tensor.Tensor()
     dy.reset_like(y)
@@ -63,6 +62,11 @@ engine is case insensitive. Each python layer would create the correct specific
 layer using the engine attribute.
 '''
 
+if singa_wrap.USE_CUDNN:
+    cudnn_version = singa_wrap.CUDNN_VERSION
+else:
+    cudnn_version = 0
+
 
 class Layer(object):
     '''Base Python layer class.
@@ -77,9 +81,8 @@ class Layer(object):
     Args:
         name (str): layer name
     '''
-
     def __init__(self, name, conf=None, **kwargs):
-        if conf == None:
+        if conf is None:
             self.layer = None  # layer converted by swig
             self.name = name  # TODO(wangwei) duplicate with self.conf.name
             self.conf = model_pb2.LayerConf()
@@ -95,20 +98,19 @@ class Layer(object):
             #   case1: parameters of conv and dense layers
             #   case2: type of activation layers
             if (conf.type == 'Convolution' or conf.type == 4) or \
-                (conf.type == 'InnerProduct' or conf.type == 14):
+                    (conf.type == 'InnerProduct' or conf.type == 14):
                 w, b = _construct_param_specs_from_caffe_proto(conf)
                 del conf.param[:]
                 conf.param.extend([w, b])
                 self.param_specs.append(w)
                 self.param_specs.append(b)
-                #print 'conf:\n', conf
+                # print 'conf:\n', conf
             if conf.type == 'Pooling':
                 conf.pooling_conf.ceil = True
-                #print 'conf:\n', conf
-
-            elif (conf.type == 'ReLU' or conf.type == 18) or \
-                (conf.type == 'Sigmoid' or conf.type == 19) or \
-                (conf.type == 'TanH' or conf.type == 23):
+                # print 'conf:\n', conf
+            elif (conf.type == 'ReLU' or conf.type == 18 or
+                  conf.type == 'Sigmoid' or conf.type == 19 or
+                  conf.type == 'TanH' or conf.type == 23):
                 conf.type = (engine + '_' + conf.type).lower()
             self.conf = conf
 
@@ -123,7 +125,6 @@ class Layer(object):
             self.layer = _create_layer(engine, 'Dense')
         else:
             self.layer = _create_layer(engine, str(self.conf.type))
-
 
     def param_names(self):
         '''
@@ -146,8 +147,11 @@ class Layer(object):
         '''
         if self.has_setup:
             return
-        self.layer.Setup(list(in_shapes),
-                         self.conf.SerializeToString())
+        if type(in_shapes[0]) is tuple:
+            self.layer.SetupWithMultInputs([list(s) for s in in_shapes],
+                                           self.conf.SerializeToString())
+        else:
+            self.layer.Setup(list(in_shapes), self.conf.SerializeToString())
         self.has_setup = True
 
     def get_output_sample_shape(self):
@@ -180,7 +184,8 @@ class Layer(object):
         '''Forward propagate through this layer.
 
         Args:
-            flag (int): kTrain or kEval
+            flag: True (kTrain) for training (kEval); False for evaluating;
+                other values for furture use.
             x (Tensor or list<Tensor>): an input tensor if the layer is
                 connected from a single layer; a list of tensors if the layer
                 is connected from multiple layers.
@@ -190,16 +195,19 @@ class Layer(object):
             tensors if the layer is connected to multiple layers;
         '''
         assert self.has_setup, 'Must call setup() before forward()'
-        if type(x) == list:
-            xs = []
-            for t in x:
-                xs.append(t.singa_tensor)
+        if type(flag) is bool:
+            if flag:
+                flag = model_pb2.kTrain
+            else:
+                flag = model_pb2.kEval
+        if type(x) is list:
+            xs = [t.singa_tensor for t in x]
+            y = self.layer.ForwardWithMultInputs(flag, xs)
         else:
             assert isinstance(x, tensor.Tensor), \
                 'input must be a Tensor or a list of Tensor'
-            xs = x.singa_tensor
-        y = self.layer.Forward(flag, xs)
-        if type(y) == list:
+            y = self.layer.Forward(flag, x.singa_tensor)
+        if type(y) is tuple:
             return tensor.from_raw_tensors(y)
         else:
             return tensor.from_raw_tensor(y)
@@ -215,16 +223,21 @@ class Layer(object):
             <dx, <dp1, dp2..>>, dx is a (set of) tensor(s) for the gradient of x
             , dpi is the gradient of the i-th parameter
         '''
+        if type(flag) is bool:
+            if flag:
+                flag = model_pb2.kTrain
+            else:
+                flag = model_pb2.kEval
+
         if type(dy) == list:
-            dys = []
-            for t in dy:
-                dys.append(t.singa_tensor)
+            dys = [t.singa_tensor for t in dy]
+            ret = self.layer.BackwardWithMultInputs(flag, dys)
         else:
             assert isinstance(dy, tensor.Tensor), \
                 'the input must be a Tensor or a set of Tensor'
             dys = dy.singa_tensor
-        ret = self.layer.Backward(flag, dys)
-        if type(ret[0]) == list:
+            ret = self.layer.Backward(flag, dys)
+        if type(ret[0]) is tuple:
             dxs = tensor.from_raw_tensors(ret[0])
         else:
             dxs = tensor.from_raw_tensor(ret[0])
@@ -247,6 +260,28 @@ class Layer(object):
 
     def __deepcopy__(self):
         pass
+
+
+class Dummy(Layer):
+    '''A dummy layer that does nothing but just forwards/backwards the data
+    (the input/output is a single tensor).
+    '''
+    def __init__(self, name, input_sample_shape=None):
+        super(Dummy, self).__init__(name)
+        self.output_sample_shape = input_sample_shape
+
+    def get_output_sample_shape(self):
+        return self.output_sample_shape
+
+    def setup(self, input_sample_shape):
+        self.output_sample_shape = input_sample_shape
+        self.has_setup = True
+
+    def forward(self, flag, x):
+        return x
+
+    def backward(self, falg, dy):
+        return dy
 
 
 class Conv2D(Layer):
@@ -695,6 +730,15 @@ class Merge(Layer):
         return self.in_shape
 
     def forward(self, flag, inputs):
+        '''Merge all input tensors by summation.
+
+        Args:
+            flag: not used.
+            inputs (list): a list of tensors
+
+        Returns:
+            A single tensor as the sum of all input tensors
+        '''
         assert len(inputs) > 1, 'There must be multiple input tensors'
         self.num_input = len(inputs)
         output = tensor.Tensor()
@@ -707,6 +751,7 @@ class Merge(Layer):
     def backward(self, flag, grad):
         assert isinstance(grad, tensor.Tensor), 'The input must be Tensor'
         return [grad] * self.num_input, []  # * self.num_input
+
 
 class Split(Layer):
     '''Replicate the input tensor.
@@ -727,9 +772,18 @@ class Split(Layer):
         self.has_setup = True
 
     def get_output_sample_shape(self):
-        return self.in_shape
+        return [self.in_shape] * self.num_output
 
     def forward(self, flag, input):
+        '''Replicate the input tensor into mutiple tensors.
+
+        Args:
+            flag: not used
+            input: a single input tensor
+
+        Returns:
+            a list a output tensor (each one is a copy of the input)
+        '''
         assert isinstance(input, tensor.Tensor), 'The input must be Tensor'
         outputs = [input] * self.num_output
         return outputs
@@ -742,6 +796,59 @@ class Split(Layer):
         for g in grads:
             dx += g
         return dx, []
+
+
+class Concat(Layer):
+    '''Concatenate tensors vertically (axis = 0) or horizontally (axis = 1).
+
+    Currently, only support tensors with 2 dimensions.
+
+    Args:
+        axis(int): 0 for concat row; 1 for concat columns;
+        input_sample_shapes: a list of shape tuples, one per input tensor
+    '''
+
+    def __init__(self, name, axis, input_sample_shapes=None):
+        super(Concat, self).__init__(name)
+        self.in_shapes = input_sample_shapes
+        self.axis = axis
+        self.conf.concat_conf.axis = axis
+	if engine == "cudnn":
+            self.layer = _create_layer('singacuda', 'Concat')
+        else:
+            self.layer = _create_layer(engine, 'Concat')
+        if input_sample_shapes is not None:
+            self.setup(input_sample_shapes)
+
+
+class Slice(Layer):
+    '''Slice the input tensor into multiple sub-tensors vertially (axis=0) or
+    horizontally (axis=1).
+
+    Args:
+        axis (int): 0 for slice rows; 1 for slice columns;
+        slice_point(list): positions along the axis to do slice; there are n-1
+            points for n sub-tensors;
+        input_sample_shape: input tensor shape
+    '''
+
+    def __init__(self, name, axis, slice_point, input_sample_shape=None):
+        super(Slice, self).__init__(name)
+        self.in_shape = input_sample_shape
+        self.axis = axis
+        self.conf.slice_conf.axis = axis
+        self.conf.slice_conf.slice_point.extend(slice_point)
+	if engine == "cudnn":
+            self.layer = _create_layer('singacuda', 'Slice')
+        else:
+            self.layer = _create_layer(engine, 'Slice')
+        if input_sample_shape is not None:
+            self.setup(input_sample_shape)
+
+    def get_output_sample_shape(self):
+        out = []
+        for i in range(len(self.conf.slice_conf.slice_point) + 1):
+            out.append(self.layer.GetOutputSampleShape(i))
 
 
 class RNN(Layer):
@@ -795,7 +902,8 @@ class RNN(Layer):
         '''Forward inputs through the RNN.
 
         Args:
-            flag, kTrain or kEval.
+            flag: True(kTrain) for training; False(kEval) for evaluation;
+                others values for future use.
             inputs, <x1, x2,...xn, hx, cx>, where xi is the input tensor for the
                 i-th position, its shape is (batch_size, input_feature_length);
                 the batch_size of xi must >= that of xi+1; hx is the initial
@@ -821,7 +929,12 @@ class RNN(Layer):
             assert isinstance(t, tensor.Tensor), \
                 'input must be py Tensor %s' % (type(t))
             tensors.append(t.singa_tensor)
-        y = self.layer.Forward(flag, tensors)
+        if type(flag) is bool:
+            if flag:
+                flag = model_pb2.kTrain
+            else:
+                flag = model_pb2.kEval
+        y = self.layer.ForwardWithMultInputs(flag, tensors)
         return tensor.from_raw_tensors(y)
 
     def backward(self, flag, grad):
@@ -845,11 +958,17 @@ class RNN(Layer):
                 hidden state. dcx is the gradient for the initial cell state,
                 which is valid only for lstm.
         '''
+        if type(flag) is bool:
+            if flag:
+                flag = model_pb2.kTrain
+            else:
+                flag = model_pb2.kEval
+
         tensors = []
         for t in grad:
             assert isinstance(t, tensor.Tensor), 'grad must be py Tensor'
             tensors.append(t.singa_tensor)
-        ret = self.layer.Backward(flag, tensors)
+        ret = self.layer.BackwardWithMultInputs(flag, tensors)
         return tensor.from_raw_tensors(ret[0]), tensor.from_raw_tensors(ret[1])
 
 

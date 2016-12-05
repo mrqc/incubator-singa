@@ -16,6 +16,9 @@
 # limitations under the License.
 #
 
-from . import singa_wrap
+import unittest
 
-__version__ = singa_wrap.SINGA_VERSION
+loader = unittest.TestLoader()
+tests = loader.discover('.')
+testRunner = unittest.runner.TextTestRunner()
+testRunner.run(tests)
